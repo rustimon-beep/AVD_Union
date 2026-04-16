@@ -329,6 +329,7 @@ function parseExcelItems(rows: Record<string, unknown>[]): ItemForm[] {
         "Quantity",
         "quantity",
         "qty",
+        "Кол-во всего",
       ]);
 
       return {
