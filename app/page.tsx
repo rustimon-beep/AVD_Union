@@ -93,9 +93,15 @@ const EMPTY_ITEM: ItemForm = {
   canceledDate: "",
 };
 
+function getTodayDate() {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
 const EMPTY_ORDER_FORM = {
   clientOrder: "",
-  orderDate: "",
+  orderDate: getTodayDate(),
   orderType: "Стандартный",
   comment: "",
   newComment: "",
@@ -352,6 +358,7 @@ export default function OrdersPage() {
   const [form, setForm] = useState(EMPTY_ORDER_FORM);
   const [loading, setLoading] = useState(true);
   const [authLoading, setAuthLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [copiedArticle, setCopiedArticle] = useState<string | null>(null);
   const [expandedOrders, setExpandedOrders] = useState<number[]>([]);
@@ -377,6 +384,39 @@ export default function OrdersPage() {
   }, [copiedArticle]);
 
   const fetchProfile = async (userId: string): Promise<UserProfile | null> => {
+    const cacheKey = `profile-${userId}`;
+
+    try {
+      const cached =
+        typeof window !== "undefined" ? window.localStorage.getItem(cacheKey) : null;
+
+      if (cached) {
+        const parsed = JSON.parse(cached) as UserProfile;
+
+        setTimeout(async () => {
+          const { data, error } = await supabase
+            .from("profiles")
+            .select("id, email, full_name, role")
+            .eq("id", userId)
+            .single();
+
+          if (!error && data && typeof window !== "undefined") {
+            const freshProfile: UserProfile = {
+              id: data.id,
+              email: data.email,
+              role: data.role,
+              name: data.full_name,
+            };
+            window.localStorage.setItem(cacheKey, JSON.stringify(freshProfile));
+          }
+        }, 0);
+
+        return parsed;
+      }
+    } catch (e) {
+      console.error("Ошибка чтения кэша профиля:", e);
+    }
+
     const { data, error } = await supabase
       .from("profiles")
       .select("id, email, full_name, role")
@@ -388,12 +428,22 @@ export default function OrdersPage() {
       return null;
     }
 
-    return {
+    const profile: UserProfile = {
       id: data.id,
       email: data.email,
       role: data.role,
       name: data.full_name,
     };
+
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(cacheKey, JSON.stringify(profile));
+      }
+    } catch (e) {
+      console.error("Ошибка записи кэша профиля:", e);
+    }
+
+    return profile;
   };
 
   useEffect(() => {
@@ -406,18 +456,23 @@ export default function OrdersPage() {
         data: { session },
       } = await supabase.auth.getSession();
 
-      if (session?.user) {
-        const profile = await fetchProfile(session.user.id);
-        if (mounted) {
-          setUser(profile);
-        }
-      } else if (mounted) {
+      if (!mounted) return;
+
+      if (!session?.user) {
         setUser(null);
+        setAuthLoading(false);
+        return;
       }
 
-      if (mounted) {
-        setAuthLoading(false);
-      }
+      setAuthLoading(false);
+      setProfileLoading(true);
+
+      const profile = await fetchProfile(session.user.id);
+
+      if (!mounted) return;
+
+      setUser(profile);
+      setProfileLoading(false);
     };
 
     initAuth();
@@ -425,18 +480,21 @@ export default function OrdersPage() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        const profile = await fetchProfile(session.user.id);
-        if (mounted) {
-          setUser(profile);
-        }
-      } else if (mounted) {
+      if (!mounted) return;
+
+      if (!session?.user) {
         setUser(null);
+        setProfileLoading(false);
+        return;
       }
 
-      if (mounted) {
-        setAuthLoading(false);
-      }
+      setProfileLoading(true);
+      const profile = await fetchProfile(session.user.id);
+
+      if (!mounted) return;
+
+      setUser(profile);
+      setProfileLoading(false);
     });
 
     return () => {
@@ -560,32 +618,49 @@ export default function OrdersPage() {
       return;
     }
 
+    setProfileLoading(true);
     const profile = await fetchProfile(authUser.id);
 
     if (!profile) {
       setLoginError("Профиль пользователя не найден");
       await supabase.auth.signOut();
+      setProfileLoading(false);
       return;
     }
 
     setUser(profile);
+    setProfileLoading(false);
     setLoginError("");
   };
 
   const logout = async () => {
+    if (user && typeof window !== "undefined") {
+      window.localStorage.removeItem(`profile-${user.id}`);
+    }
+
     await supabase.auth.signOut();
     setUser(null);
     setLoginForm({ login: "", password: "" });
   };
 
   const resetForm = () => {
-    setForm(EMPTY_ORDER_FORM);
+    setForm({
+      ...EMPTY_ORDER_FORM,
+      orderDate: getTodayDate(),
+      items: [{ ...EMPTY_ITEM }],
+    });
     setEditingOrderId(null);
   };
 
   const openCreate = () => {
     if (user?.role !== "admin") return;
-    resetForm();
+
+    setEditingOrderId(null);
+    setForm({
+      ...EMPTY_ORDER_FORM,
+      orderDate: getTodayDate(),
+      items: [{ ...EMPTY_ITEM }],
+    });
     setOpen(true);
   };
 
@@ -639,12 +714,16 @@ export default function OrdersPage() {
         [field]: value,
       } as ItemForm;
 
-      if (field === "status" && value !== "Поставлен") {
-        nextItem.deliveredDate = "";
-      }
+      if (field === "status") {
+        if (value !== "Поставлен") {
+          nextItem.deliveredDate = "";
+        }
 
-      if (field === "status" && value !== "Отменен") {
-        nextItem.canceledDate = "";
+        if (value === "Отменен") {
+          nextItem.canceledDate = getTodayDate();
+        } else {
+          nextItem.canceledDate = "";
+        }
       }
 
       if (field === "hasReplacement" && value === false) {
@@ -684,7 +763,7 @@ export default function OrdersPage() {
         ...item,
         status: prev.bulkStatus,
         deliveredDate: prev.bulkStatus === "Поставлен" ? item.deliveredDate : "",
-        canceledDate: prev.bulkStatus === "Отменен" ? item.canceledDate : "",
+        canceledDate: prev.bulkStatus === "Отменен" ? getTodayDate() : "",
       })),
     }));
   };
@@ -887,7 +966,7 @@ export default function OrdersPage() {
       if (isEditing) {
         const invalidItems = validItems.some((item) => !item.id);
         if (invalidItems) {
-          alert("Нельзя добавлять новые позиции в уже созданном заказе");
+          alert("Нельзя добавлять новые позиции в уже созданный заказ");
           return;
         }
       }
@@ -1165,10 +1244,8 @@ export default function OrdersPage() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-100 p-4 md:p-8 flex items-center justify-center">
-        <div className="rounded-3xl bg-white px-6 py-5 shadow-sm ring-1 ring-slate-200 text-slate-600">
-          Проверка сессии...
-        </div>
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
       </div>
     );
   }
@@ -1245,12 +1322,15 @@ export default function OrdersPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm text-slate-500">Пользователь:</span>
                 <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
-                  {user.name} ·{" "}
-                  {user.role === "admin"
-                    ? "Администратор"
-                    : user.role === "supplier"
-                    ? "Поставщик"
-                    : "Наблюдатель"}
+                  {profileLoading
+                    ? "Загрузка профиля..."
+                    : `${user.name} · ${
+                        user.role === "admin"
+                          ? "Администратор"
+                          : user.role === "supplier"
+                          ? "Поставщик"
+                          : "Наблюдатель"
+                      }`}
                 </div>
                 <button
                   onClick={logout}
@@ -1797,6 +1877,7 @@ export default function OrdersPage() {
                             </label>
                             <input
                               type="date"
+                              min={getTodayDate()}
                               value={form.bulkPlannedDate}
                               disabled={saving}
                               onChange={(e) =>
@@ -1988,6 +2069,7 @@ export default function OrdersPage() {
                             </label>
                             <input
                               type="date"
+                              min={getTodayDate()}
                               value={item.plannedDate}
                               disabled={!canEditItemStatusFields() || saving}
                               onChange={(e) => updateItemField(index, "plannedDate", e.target.value)}
@@ -2019,6 +2101,7 @@ export default function OrdersPage() {
                             </label>
                             <input
                               type="date"
+                              min={getTodayDate()}
                               value={item.deliveredDate}
                               disabled={
                                 !canEditItemStatusFields() ||
@@ -2036,6 +2119,7 @@ export default function OrdersPage() {
                             </label>
                             <input
                               type="date"
+                              min={getTodayDate()}
                               value={item.canceledDate}
                               disabled={
                                 !canEditItemStatusFields() ||
